@@ -38,3 +38,14 @@ func GetStagedFiles() ([]string, error) {
 	files := strings.Split(output, "\n")
 	return files, nil
 }
+
+func Commit(message string) error {
+	cmd := exec.Command("git", "commit", "-m", message)
+	return cmd.Run()
+}
+
+// Push dispara as alterações para o repositório remoto (ex: GitHub)
+func Push() error {
+	cmd := exec.Command("git", "push")
+	return cmd.Run()
+}

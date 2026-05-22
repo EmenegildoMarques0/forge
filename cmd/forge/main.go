@@ -6,6 +6,7 @@ import (
 	"forge/internal/git"
 	"forge/internal/ui"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -17,6 +18,7 @@ const (
 	stateMenu state = iota
 	stateLoading
 	stateResult
+	statePushing // Novo estado para o feedback do Commit/Push
 )
 
 type model struct {
@@ -25,7 +27,7 @@ type model struct {
 	state       state
 	message     string
 	aiResult    string
-	stagedFiles []string // Nova lista para armazenar os arquivos alterados
+	stagedFiles []string // Lista para armazenar os arquivos alterados
 }
 
 func initialModel() model {
@@ -38,6 +40,7 @@ func initialModel() model {
 func (m model) Init() tea.Cmd { return nil }
 
 type aiResponseMsg string
+type commitSuccessMsg string // Nova mensagem de sucesso para fechar o app
 type errMsg error
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -48,7 +51,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 		case "esc":
-			if m.state != stateMenu {
+			if m.state != stateMenu && m.state != statePushing {
 				m.state = stateMenu
 				m.message = ""
 				return m, nil
@@ -72,8 +75,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		} else if m.state == stateResult {
+			// Alterado: Ao pressionar Enter na sugestão, inicia o Commit + Push real
 			if msg.String() == "enter" {
-				return m, tea.Quit
+				m.state = statePushing
+				return m, m.executeCommitAndPushAction()
 			}
 		}
 
@@ -84,6 +89,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		files, _ := git.GetStagedFiles()
 		m.stagedFiles = files
 		return m, nil
+
+	case commitSuccessMsg:
+		// Sucesso total, encerra o programa de forma limpa
+		return m, tea.Quit
 
 	case errMsg:
 		m.state = stateMenu
@@ -100,6 +109,10 @@ func (m model) View() string {
 	switch m.state {
 	case stateLoading:
 		body = "\n  " + lipgloss.NewStyle().Foreground(ui.EclipseCyan).Render("⏳ Adicionando arquivos e forjando inteligência...")
+
+	case statePushing:
+		// Visual de feedback enquanto o Git trabalha em segundo plano
+		body = "\n  " + lipgloss.NewStyle().Foreground(ui.EclipseCyan).Render("🚀 Gravando commit e empurrando para o GitHub...")
 
 	case stateResult:
 		body = ui.SelectedItem.Render("💡 Sugestão da IA:") + "\n\n"
@@ -118,7 +131,7 @@ func (m model) View() string {
 			}
 		}
 
-		body += "\n" + ui.HelpStyle.Render("[Enter] Confirmar Commit • [Esc] Voltar")
+		body += "\n" + ui.HelpStyle.Render("[Enter] Confirmar Commit e Fazer Push • [Esc] Voltar")
 
 	default: // stateMenu
 		body = "O que vamos forjar hoje?\n\n"
@@ -151,18 +164,48 @@ func main() {
 
 func (m model) generateCommitAction() tea.Cmd {
 	return func() tea.Msg {
-		git.AddAll()
+		// 1. Resolve o git add e captura o erro se ele falhar
+		err := git.AddAll()
+		if err != nil {
+			return errMsg(fmt.Errorf("erro ao adicionar arquivos: %v", err))
+		}
+
+		// 2. Extrai o diff das alterações preparadas
 		diff, err := git.GetDiff()
 		if err != nil {
 			return errMsg(err)
 		}
 
-		// AGORA CHAMAMOS A IA REAL
+		// 3. Validação crucial: Se não houver código alterado, não chama a IA
+		if strings.TrimSpace(diff) == "" {
+			return errMsg(fmt.Errorf("nenhuma alteração detectada no Git. Altere algum arquivo primeiro"))
+		}
+
+		// 4. Chamada real para o nosso motor HTTP leve do Gemini
 		message, err := ai.GenerateCommitMessage(diff)
 		if err != nil {
-			return errMsg(err)
+			return errMsg(err) // Se a API falhar, o erro REAL vai direto para a tela vermelha
 		}
 
 		return aiResponseMsg(message)
+	}
+}
+
+// executeCommitAndPushAction executa os comandos finais no terminal do SO
+func (m model) executeCommitAndPushAction() tea.Cmd {
+	return func() tea.Msg {
+		// 1. Executa o commit real usando a string limpa sugerida pela IA
+		err := git.Commit(strings.TrimSpace(m.aiResult))
+		if err != nil {
+			return errMsg(fmt.Errorf("falha ao executar commit: %v", err))
+		}
+
+		// 2. Dispara para o GitHub/GitLab remotos
+		err = git.Push()
+		if err != nil {
+			return errMsg(fmt.Errorf("commit feito, mas falhou o push: %v. Verifique a sua conexão", err))
+		}
+
+		return commitSuccessMsg("sucesso")
 	}
 }
