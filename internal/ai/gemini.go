@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"forge/internal/config" // Importação do gerenciador de configurações nativo do Forge
 	"io"
 	"net/http"
 	"os"
@@ -26,13 +27,22 @@ type GeminiResponse struct {
 }
 
 func GenerateCommitMessage(diff string) (string, error) {
-	apiKey := os.Getenv("GEMINI_API_KEY")
+	// 1. Tenta carregar a chave salva localmente pelo menu de configurações
+	cfg, _ := config.Load()
+	apiKey := cfg.GeminiAPIKey
+
+	// 2. Fallback: Se não estiver no arquivo JSON, tenta buscar do terminal
 	if apiKey == "" {
-		return "", fmt.Errorf("configura a GEMINI_API_KEY no teu terminal")
+		apiKey = os.Getenv("GEMINI_API_KEY")
 	}
 
-	//url := "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=" + apiKey
+	// 3. Se ambas as tentativas falharem, orienta o usuário a configurar
+	if apiKey == "" {
+		return "", fmt.Errorf("API Key não encontrada. Vá a Configurações no menu do Forge para salvar")
+	}
+
 	url := "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=" + apiKey
+
 	// Criando o prompt técnico para o padrão Conventional Commits
 	prompt := "Atue como um desenvolvedor sênior. Analise o diff abaixo e retorne APENAS uma mensagem de commit no padrão Conventional Commits. Não use Markdown, não dê explicações. Apenas o texto da mensagem.\n\nDIFF:\n" + diff
 

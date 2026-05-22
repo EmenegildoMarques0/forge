@@ -3,11 +3,13 @@ package main
 import (
 	"fmt"
 	"forge/internal/ai"
+	"forge/internal/config"
 	"forge/internal/git"
 	"forge/internal/ui"
 	"os"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput" // Import necessário para capturar a chave
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -18,7 +20,8 @@ const (
 	stateMenu state = iota
 	stateLoading
 	stateResult
-	statePushing // Novo estado para o feedback do Commit/Push
+	statePushing
+	stateConfig // Estado adicionado para gerenciar a tela de configurações
 )
 
 type model struct {
@@ -27,29 +30,50 @@ type model struct {
 	state       state
 	message     string
 	aiResult    string
-	stagedFiles []string // Lista para armazenar os arquivos alterados
+	stagedFiles []string
+	textInput   textinput.Model // Componente para manipulação de digitação
 }
 
 func initialModel() model {
+	ti := textinput.New()
+	ti.Placeholder = "Cole aqui a sua GEMINI_API_KEY (AIzaSy...)"
+	ti.Focus()
+	ti.CharLimit = 100
+	ti.Width = 50
+
+	// Tenta carregar a chave existente para já iniciar o input preenchido
+	if cfg, err := config.Load(); err == nil && cfg.GeminiAPIKey != "" {
+		ti.SetValue(cfg.GeminiAPIKey)
+	}
+
 	return model{
-		choices: []string{"🤖 Forjar Commit (IA)", "📝 Gerar README", "⚙️  Configurações"},
-		state:   stateMenu,
+		choices:   []string{"🤖 Forjar Commit (IA)", "📝 Gerar README", "⚙️  Configurações"},
+		state:     stateMenu,
+		textInput: ti,
 	}
 }
 
-func (m model) Init() tea.Cmd { return nil }
+func (m model) Init() tea.Cmd {
+	return textinput.Blink // Faz o cursor do input piscar nativamente
+}
 
 type aiResponseMsg string
-type commitSuccessMsg string // Nova mensagem de sucesso para fechar o app
+type commitSuccessMsg string
 type errMsg error
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
 	switch msg := msg.(type) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			return m, tea.Quit
+		case "q":
+			if m.state == stateMenu {
+				return m, tea.Quit
+			}
 		case "esc":
 			if m.state != stateMenu && m.state != statePushing {
 				m.state = stateMenu
@@ -58,6 +82,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Intercepta e processa as teclas se o usuário estiver na tela de Configuração
+		if m.state == stateConfig {
+			switch msg.String() {
+			case "enter":
+				key := strings.TrimSpace(m.textInput.Value())
+				if key == "" {
+					m.message = "❌ A chave não pode estar vazia!"
+					return m, nil
+				}
+				err := config.Save(key)
+				if err != nil {
+					m.message = "❌ Erro ao guardar configuração: " + err.Error()
+					return m, nil
+				}
+				m.state = stateMenu
+				m.message = "✅ Configuração gravada com sucesso!"
+				return m, nil
+			}
+
+			// Atualiza o estado interno do input de texto com o caractere digitado
+			m.textInput, cmd = m.textInput.Update(msg)
+			return m, cmd
+		}
+
+		// Processa navegação e ações padrão se estiver no Menu Principal
 		if m.state == stateMenu {
 			switch msg.String() {
 			case "up", "k":
@@ -72,10 +121,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor == 0 {
 					m.state = stateLoading
 					return m, m.generateCommitAction()
+				} else if m.cursor == 2 { // Selecionou a opção "⚙️ Configurações"
+					m.state = stateConfig
+					m.message = ""
+					return m, nil
 				}
 			}
 		} else if m.state == stateResult {
-			// Alterado: Ao pressionar Enter na sugestão, inicia o Commit + Push real
 			if msg.String() == "enter" {
 				m.state = statePushing
 				return m, m.executeCommitAndPushAction()
@@ -85,13 +137,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case aiResponseMsg:
 		m.state = stateResult
 		m.aiResult = string(msg)
-		// Busca a lista de arquivos alterados após o processamento
 		files, _ := git.GetStagedFiles()
 		m.stagedFiles = files
 		return m, nil
 
 	case commitSuccessMsg:
-		// Sucesso total, encerra o programa de forma limpa
 		return m, tea.Quit
 
 	case errMsg:
@@ -111,8 +161,16 @@ func (m model) View() string {
 		body = "\n  " + lipgloss.NewStyle().Foreground(ui.EclipseCyan).Render("⏳ Adicionando arquivos e forjando inteligência...")
 
 	case statePushing:
-		// Visual de feedback enquanto o Git trabalha em segundo plano
 		body = "\n  " + lipgloss.NewStyle().Foreground(ui.EclipseCyan).Render("🚀 Gravando commit e empurrando para o GitHub...")
+
+	case stateConfig:
+		body = ui.SelectedItem.Render("⚙️  Configuração do Forge") + "\n\n"
+		if m.message != "" {
+			body += lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")).Render(m.message) + "\n\n"
+		}
+		body += "Introduza o seu token do Gemini API:\n\n"
+		body += m.textInput.View() + "\n\n"
+		body += ui.HelpStyle.Render("[Enter] Guardar Chave • [Esc] Voltar ao Menu")
 
 	case stateResult:
 		body = ui.SelectedItem.Render("💡 Sugestão da IA:") + "\n\n"
@@ -123,7 +181,6 @@ func (m model) View() string {
 			Width(60).
 			Render(m.aiResult)
 
-		// Seção de arquivos alterados
 		if len(m.stagedFiles) > 0 {
 			body += "\n\n" + lipgloss.NewStyle().Foreground(ui.EclipseBlue).Bold(true).Render("📦 Arquivos Alterados:") + "\n"
 			for _, file := range m.stagedFiles {
@@ -136,7 +193,12 @@ func (m model) View() string {
 	default: // stateMenu
 		body = "O que vamos forjar hoje?\n\n"
 		if m.message != "" {
-			body += lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")).Render(m.message) + "\n\n"
+			// Define dinamicamente verde para sucesso ou vermelho para erros
+			color := "#ff0000"
+			if strings.HasPrefix(m.message, "✅") {
+				color = "#00ff00"
+			}
+			body += lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(m.message) + "\n\n"
 		}
 		for i, choice := range m.choices {
 			cursor := "  "
@@ -154,58 +216,51 @@ func (m model) View() string {
 	return ui.MainBox.Render(header+body) + "\n"
 }
 
-func main() {
-	p := tea.NewProgram(initialModel())
-	if _, err := p.Run(); err != nil {
-		fmt.Printf("Houve um erro: %v", err)
-		os.Exit(1)
-	}
-}
-
 func (m model) generateCommitAction() tea.Cmd {
 	return func() tea.Msg {
-		// 1. Resolve o git add e captura o erro se ele falhar
 		err := git.AddAll()
 		if err != nil {
 			return errMsg(fmt.Errorf("erro ao adicionar arquivos: %v", err))
 		}
 
-		// 2. Extrai o diff das alterações preparadas
 		diff, err := git.GetDiff()
 		if err != nil {
 			return errMsg(err)
 		}
 
-		// 3. Validação crucial: Se não houver código alterado, não chama a IA
 		if strings.TrimSpace(diff) == "" {
 			return errMsg(fmt.Errorf("nenhuma alteração detectada no Git. Garanta que está na raiz de um repositório Git"))
 		}
 
-		// 4. Chamada real para o nosso motor HTTP leve do Gemini
 		message, err := ai.GenerateCommitMessage(diff)
 		if err != nil {
-			return errMsg(err) // Se a API falhar, o erro REAL vai direto para a tela vermelha
+			return errMsg(err)
 		}
 
 		return aiResponseMsg(message)
 	}
 }
 
-// executeCommitAndPushAction executa os comandos finais no terminal do SO
 func (m model) executeCommitAndPushAction() tea.Cmd {
 	return func() tea.Msg {
-		// 1. Executa o commit real usando a string limpa sugerida pela IA
 		err := git.Commit(strings.TrimSpace(m.aiResult))
 		if err != nil {
 			return errMsg(fmt.Errorf("falha ao executar commit: %v", err))
 		}
 
-		// 2. Dispara para o GitHub/GitLab remotos
 		err = git.Push()
 		if err != nil {
 			return errMsg(fmt.Errorf("commit feito, mas falhou o push: %v. Verifique a sua conexão", err))
 		}
 
 		return commitSuccessMsg("sucesso")
+	}
+}
+
+func main() {
+	p := tea.NewProgram(initialModel())
+	if _, err := p.Run(); err != nil {
+		fmt.Printf("Houve um erro: %v", err)
+		os.Exit(1)
 	}
 }
