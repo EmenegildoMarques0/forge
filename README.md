@@ -1,4 +1,3 @@
-```markdown
 # 🌑 Forge
 
 <p align="center">
@@ -117,10 +116,5 @@ Se não listar o arquivo, refaça o comando de compilação e movimentação con
 
 ```bash
   go mod tidy
-
-```
-
-```
-
 
 ```
