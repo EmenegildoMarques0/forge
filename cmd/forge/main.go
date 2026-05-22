@@ -178,7 +178,7 @@ func (m model) generateCommitAction() tea.Cmd {
 
 		// 3. Validação crucial: Se não houver código alterado, não chama a IA
 		if strings.TrimSpace(diff) == "" {
-			return errMsg(fmt.Errorf("nenhuma alteração detectada no Git. Altere algum arquivo primeiro"))
+			return errMsg(fmt.Errorf("nenhuma alteração detectada no Git. Garanta que está na raiz de um repositório Git"))
 		}
 
 		// 4. Chamada real para o nosso motor HTTP leve do Gemini
