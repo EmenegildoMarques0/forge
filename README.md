@@ -1,7 +1,3 @@
-Aqui está a documentação do teu **`README.md`** totalmente atualizada e profissional. Adaptei o conteúdo para refletir a instalação global nativa do Go, como gerenciar e atualizar o binário no Linux, e adicionei uma seção de **Resolução de Problemas** robusta para cobrir os erros de ambiente e permissões que resolvemos.
-
-Substitua o conteúdo do seu **`README.md`** por este:
-
 ```markdown
 # 🌑 Forge
 
@@ -126,6 +122,5 @@ Se não listar o arquivo, refaça o comando de compilação e movimentação con
 
 ```
 
-A documentação está fechada na versão **1.0.0**, limpa, scannable e cobre exatamente toda a infraestrutura que montamos. O projeto está pronto para ser compartilhado!
 
 ```
