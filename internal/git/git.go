@@ -35,8 +35,8 @@ func SwitchBranch(name string) error {
 }
 
 // CreatePullRequest cria uma pull request no repositório remoto usando o GitHub CLI
-func CreatePullRequest(title, body string) error {
-	args := []string{"pr", "create", "--title", title, "--body", body}
+func CreatePullRequest(title, body, head, base string) error {
+	args := []string{"pr", "create", "--title", title, "--body", body, "--head", head, "--base", base}
 	cmd := exec.Command("gh", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

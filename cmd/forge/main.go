@@ -7,6 +7,7 @@ import (
 	"forge/internal/git"
 	"forge/internal/ui"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput" // Import necessário para capturar a chave
@@ -33,6 +34,8 @@ type model struct {
 	aiResult    string
 	stagedFiles []string
 	textInput   textinput.Model // Componente para manipulação de digitação
+	prLink      string          // Link da Pull Request criada
+	prStep      string          // Mensagem de progresso da criação de PR
 }
 
 func initialModel() model {
@@ -125,6 +128,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.cursor == 2 { // Selecionou a opção "🔀 Criar Pull Request"
 					m.state = statePR
 					m.message = ""
+					m.prStep = "🔍 A verificar GitHub CLI..."
 					return m, m.createPRAction()
 				} else if m.cursor == 3 { // Selecionou a opção "⚙️ Configurações"
 					m.state = stateConfig
@@ -149,6 +153,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case commitSuccessMsg:
 		return m, tea.Quit
 
+	case prStepMsg:
+		m.prStep = string(msg)
+		return m, nil
+
+	case prSuccessMsg:
+		m.state = stateResult
+		m.message = msg.message
+		m.prLink = msg.link
+		m.aiResult = "Pull Request criada com sucesso!"
+		return m, nil
+
 	case errMsg:
 		m.state = stateMenu
 		m.message = "❌ " + msg.Error()
@@ -170,6 +185,9 @@ func (m model) View() string {
 
 	case statePR:
 		body = "\n  " + lipgloss.NewStyle().Foreground(ui.EclipseCyan).Render("🔀 Criando Pull Request no GitHub...")
+		if m.prStep != "" {
+			body += "\n\n  " + lipgloss.NewStyle().Foreground(lipgloss.Color("#ffff00")).Render(m.prStep)
+		}
 
 	case stateConfig:
 		body = ui.SelectedItem.Render("⚙️  Configuração do Forge") + "\n\n"
@@ -194,6 +212,12 @@ func (m model) View() string {
 			for _, file := range m.stagedFiles {
 				body += fmt.Sprintf("  %s %s\n", lipgloss.NewStyle().Foreground(ui.EclipseCyan).Render("•"), file)
 			}
+		}
+
+		// Exibe o link da PR se estiver disponível
+		if m.prLink != "" {
+			body += "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Bold(true).Render("🔗 Pull Request:") + "\n"
+			body += lipgloss.NewStyle().Foreground(ui.EclipseCyan).Underline(true).Render(m.prLink) + "\n"
 		}
 
 		body += "\n" + ui.HelpStyle.Render("[Enter] Confirmar Commit e Fazer Push • [Esc] Voltar")
@@ -265,6 +289,9 @@ func (m model) executeCommitAndPushAction() tea.Cmd {
 	}
 }
 
+// prStepMsg representa uma mensagem de progresso durante a criação de PR
+type prStepMsg string
+
 func (m model) createPRAction() tea.Cmd {
 	return func() tea.Msg {
 		// Verifica se o gh CLI está instalado
@@ -272,29 +299,108 @@ func (m model) createPRAction() tea.Cmd {
 			return errMsg(fmt.Errorf("GitHub CLI (gh) não encontrado. Instale-o para criar Pull Requests automaticamente"))
 		}
 
-		// Gera título e descrição a partir do diff atual
+		// Obtém a branch atual
+		currentBranch, err := git.GetCurrentBranch()
+		if err != nil {
+			return errMsg(fmt.Errorf("erro ao obter branch atual: %v", err))
+		}
+
+		// Adiciona todas as alterações ao stage
+		if err := git.AddAll(); err != nil {
+			return errMsg(fmt.Errorf("erro ao adicionar arquivos: %v", err))
+		}
+
+		// Gera dados estruturados para PR a partir do diff staged
 		diff, err := git.GetDiff()
 		if err != nil {
 			return errMsg(fmt.Errorf("erro ao obter diff: %v", err))
+		}
+
+		// Se não houver diff staged, tenta obter diff unstaged (arquivos modificados mas não adicionados)
+		if strings.TrimSpace(diff) == "" {
+			diffUnstaged, err := git.GetUnstagedDiff()
+			if err != nil {
+				return errMsg(fmt.Errorf("erro ao obter diff unstaged: %v", err))
+			}
+			diff = diffUnstaged
 		}
 
 		if strings.TrimSpace(diff) == "" {
 			return errMsg(fmt.Errorf("nenhuma alteração detectada no Git. Garanta que está na raiz de um repositório Git"))
 		}
 
-		message, err := ai.GenerateCommitMessage(diff)
+		// Atualiza o passo atual na UI
+		m.prStep = "🤖 A gerar dados da Pull Request com IA..."
+
+		prData, err := ai.GeneratePRData(diff)
 		if err != nil {
-			return errMsg(fmt.Errorf("erro ao gerar mensagem para PR: %v", err))
+			return errMsg(fmt.Errorf("erro ao gerar dados para PR: %v", err))
 		}
 
+		// Atualiza o passo atual na UI
+		m.prStep = fmt.Sprintf("🌿 A criar branch '%s'...", prData.BranchName)
+
+		// Cria a nova branch e move as alterações para ela
+		if err := git.CreateAndSwitchBranch(prData.BranchName); err != nil {
+			return errMsg(fmt.Errorf("falha ao criar branch '%s': %v", prData.BranchName, err))
+		}
+
+		// Atualiza o passo atual na UI
+		m.prStep = "📝 A fazer commit das alterações..."
+
+		// Faz commit das alterações na nova branch
+		if err := git.Commit(prData.Title); err != nil {
+			// Volta para a branch original em caso de erro
+			git.SwitchBranch(currentBranch)
+			return errMsg(fmt.Errorf("falha ao fazer commit na nova branch: %v", err))
+		}
+
+		// Atualiza o passo atual na UI
+		m.prStep = fmt.Sprintf("🚀 A fazer push da branch '%s' para o remoto...", prData.BranchName)
+
+		// Faz push da nova branch para o remoto
+		if err := git.Push(); err != nil {
+			git.SwitchBranch(currentBranch)
+			return errMsg(fmt.Errorf("falha ao fazer push da branch '%s': %v. Verifique a sua conexão", prData.BranchName, err))
+		}
+
+		// Atualiza o passo atual na UI
+		m.prStep = "🔀 A criar Pull Request no GitHub..."
+
 		// Cria a Pull Request usando o gh CLI
-		err = git.CreatePullRequest(message, "Pull request gerado automaticamente pelo Forge")
-		if err != nil {
+		if err := git.CreatePullRequest(prData.Title, prData.Body, prData.BranchName, currentBranch); err != nil {
+			git.SwitchBranch(currentBranch)
 			return errMsg(fmt.Errorf("falha ao criar Pull Request: %v", err))
 		}
 
-		return commitSuccessMsg("Pull Request criada com sucesso!")
+		// Atualiza o passo atual na UI
+		m.prStep = "✅ Pull Request criada com sucesso!"
+
+		// Volta para a branch original
+		if err := git.SwitchBranch(currentBranch); err != nil {
+			return errMsg(fmt.Errorf("PR criada, mas falhou ao voltar para a branch '%s': %v", currentBranch, err))
+		}
+
+		// Tenta obter o link da PR criada
+		prLink := getPRLink(prData.BranchName)
+		return prSuccessMsg{message: "Pull Request criada com sucesso!", link: prLink}
 	}
+}
+
+// getPRLink tenta obter o link da PR criada usando o gh CLI
+func getPRLink(branchName string) string {
+	cmd := exec.Command("gh", "pr", "view", branchName, "--json", "url", "--jq", ".url")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// prSuccessMsg representa uma mensagem de sucesso na criação de PR com link
+type prSuccessMsg struct {
+	message string
+	link    string
 }
 
 func main() {
