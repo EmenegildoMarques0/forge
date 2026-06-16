@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 )
 
 // GeminiResponse mapeia a resposta de sucesso e possíveis erros da API
@@ -62,37 +64,83 @@ func GenerateCommitMessage(diff string) (string, error) {
 		return "", err
 	}
 
-	// Fazendo a requisição HTTP direta para o Google
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
+	const maxRetries = 10
+	const retryInterval = 4 * time.Second
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Fazendo a requisição HTTP direta para o Google
+		resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", err
+		}
+
+		// Se o status HTTP não for 200 OK, expõe o corpo do erro retornado
+		if resp.StatusCode != http.StatusOK {
+			errorMsg := string(body)
+			// Verifica se o erro indica que o modelo está sobrecarregado/sob demanda
+			if isOverloadedError(errorMsg) {
+				fmt.Printf("\n⚠️  Modelo do Gemini está sobrecarregado (tentativa %d/%d). Aguardando %d segundos para tentar novamente...\n", attempt, maxRetries, int(retryInterval.Seconds()))
+				time.Sleep(retryInterval)
+				continue
+			}
+			return "", fmt.Errorf("API respondeu com status %d: %s", resp.StatusCode, errorMsg)
+		}
+
+		var geminiResp GeminiResponse
+		if err := json.Unmarshal(body, &geminiResp); err != nil {
+			return "", fmt.Errorf("erro ao decodificar resposta da IA: %v", err)
+		}
+
+		// Se o JSON contiver uma estrutura de erro da API
+		if geminiResp.Error != nil {
+			errorMsg := geminiResp.Error.Message
+			// Verifica se o erro indica que o modelo está sobrecarregado/sob demanda
+			if isOverloadedError(errorMsg) {
+				fmt.Printf("\n⚠️  Modelo do Gemini está sobrecarregado (tentativa %d/%d). Aguardando %d segundos para tentar novamente...\n", attempt, maxRetries, int(retryInterval.Seconds()))
+				time.Sleep(retryInterval)
+				continue
+			}
+			return "", fmt.Errorf("erro na API do Gemini: %s", errorMsg)
+		}
+
+		// Retorna a mensagem gerada com sucesso pela IA
+		if len(geminiResp.Candidates) > 0 && len(geminiResp.Candidates[0].Content.Parts) > 0 {
+			return geminiResp.Candidates[0].Content.Parts[0].Text, nil
+		}
+
+		return "", fmt.Errorf("IA respondeu com sucesso, mas não retornou nenhuma sugestão de texto válida")
 	}
 
-	// Se o status HTTP não for 200 OK, expõe o corpo do erro retornado
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API respondeu com status %d: %s", resp.StatusCode, string(body))
+	return "", fmt.Errorf("modelo do Gemini permaneceu sobrecarregado após %d tentativas. Tente novamente mais tarde", maxRetries)
+}
+
+// isOverloadedError verifica se a mensagem de erro indica que o modelo está sobrecarregado
+func isOverloadedError(errorMsg string) bool {
+	lowerMsg := strings.ToLower(errorMsg)
+	overloadedKeywords := []string{
+		"overloaded",
+		"sobrecarregado",
+		"resource exhausted",
+		"rate limit",
+		"too many requests",
+		"service unavailable",
+		"503",
+		"model is overloaded",
+		"currently overloaded",
+		"please try again later",
+		"tente novamente mais tarde",
 	}
 
-	var geminiResp GeminiResponse
-	if err := json.Unmarshal(body, &geminiResp); err != nil {
-		return "", fmt.Errorf("erro ao decodificar resposta da IA: %v", err)
+	for _, keyword := range overloadedKeywords {
+		if strings.Contains(lowerMsg, keyword) {
+			return true
+		}
 	}
-
-	// Se o JSON contiver uma estrutura de erro da API
-	if geminiResp.Error != nil {
-		return "", fmt.Errorf("erro na API do Gemini: %s", geminiResp.Error.Message)
-	}
-
-	// Retorna a mensagem gerada com sucesso pela IA
-	if len(geminiResp.Candidates) > 0 && len(geminiResp.Candidates[0].Content.Parts) > 0 {
-		return geminiResp.Candidates[0].Content.Parts[0].Text, nil
-	}
-
-	return "", fmt.Errorf("IA respondeu com sucesso, mas não retornou nenhuma sugestão de texto válida")
+	return false
 }
