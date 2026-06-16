@@ -5,6 +5,21 @@ import (
 	"strings"
 )
 
+// CheckGHCLI verifica se o GitHub CLI (gh) está instalado
+func CheckGHCLI() error {
+	cmd := exec.Command("gh", "--version")
+	return cmd.Run()
+}
+
+// CreatePullRequest cria uma pull request no repositório remoto usando o GitHub CLI
+func CreatePullRequest(title, body string) error {
+	args := []string{"pr", "create", "--title", title, "--body", body}
+	cmd := exec.Command("gh", args...)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run()
+}
+
 // AddAll executa o comando 'git add .' para preparar todos os arquivos
 func AddAll() error {
 	cmd := exec.Command("git", "add", ".")

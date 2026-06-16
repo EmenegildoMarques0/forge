@@ -22,6 +22,7 @@ const (
 	stateResult
 	statePushing
 	stateConfig // Estado adicionado para gerenciar a tela de configurações
+	statePR     // Estado para criação de Pull Request
 )
 
 type model struct {
@@ -47,7 +48,7 @@ func initialModel() model {
 	}
 
 	return model{
-		choices:   []string{"🤖 Forjar Commit (IA)", "📝 Gerar README", "⚙️  Configurações"},
+		choices:   []string{"🤖 Forjar Commit (IA)", "📝 Gerar README", "🔀 Criar Pull Request", "⚙️  Configurações"},
 		state:     stateMenu,
 		textInput: ti,
 	}
@@ -75,7 +76,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		case "esc":
-			if m.state != stateMenu && m.state != statePushing {
+			if m.state != stateMenu && m.state != statePushing && m.state != statePR {
 				m.state = stateMenu
 				m.message = ""
 				return m, nil
@@ -97,7 +98,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.state = stateMenu
-				m.message = "✅ Configuração gravada com sucesso!"
+				m.message = "✅ A Configuração foi gravada com sucesso!"
 				return m, nil
 			}
 
@@ -121,7 +122,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor == 0 {
 					m.state = stateLoading
 					return m, m.generateCommitAction()
-				} else if m.cursor == 2 { // Selecionou a opção "⚙️ Configurações"
+				} else if m.cursor == 2 { // Selecionou a opção "🔀 Criar Pull Request"
+					m.state = statePR
+					m.message = ""
+					return m, m.createPRAction()
+				} else if m.cursor == 3 { // Selecionou a opção "⚙️ Configurações"
 					m.state = stateConfig
 					m.message = ""
 					return m, nil
@@ -162,6 +167,9 @@ func (m model) View() string {
 
 	case statePushing:
 		body = "\n  " + lipgloss.NewStyle().Foreground(ui.EclipseCyan).Render("🚀 Gravando commit e empurrando para o GitHub...")
+
+	case statePR:
+		body = "\n  " + lipgloss.NewStyle().Foreground(ui.EclipseCyan).Render("🔀 Criando Pull Request no GitHub...")
 
 	case stateConfig:
 		body = ui.SelectedItem.Render("⚙️  Configuração do Forge") + "\n\n"
@@ -254,6 +262,38 @@ func (m model) executeCommitAndPushAction() tea.Cmd {
 		}
 
 		return commitSuccessMsg("sucesso")
+	}
+}
+
+func (m model) createPRAction() tea.Cmd {
+	return func() tea.Msg {
+		// Verifica se o gh CLI está instalado
+		if err := git.CheckGHCLI(); err != nil {
+			return errMsg(fmt.Errorf("GitHub CLI (gh) não encontrado. Instale-o para criar Pull Requests automaticamente"))
+		}
+
+		// Gera título e descrição a partir do diff atual
+		diff, err := git.GetDiff()
+		if err != nil {
+			return errMsg(fmt.Errorf("erro ao obter diff: %v", err))
+		}
+
+		if strings.TrimSpace(diff) == "" {
+			return errMsg(fmt.Errorf("nenhuma alteração detectada no Git. Garanta que está na raiz de um repositório Git"))
+		}
+
+		message, err := ai.GenerateCommitMessage(diff)
+		if err != nil {
+			return errMsg(fmt.Errorf("erro ao gerar mensagem para PR: %v", err))
+		}
+
+		// Cria a Pull Request usando o gh CLI
+		err = git.CreatePullRequest(message, "Pull request gerado automaticamente pelo Forge")
+		if err != nil {
+			return errMsg(fmt.Errorf("falha ao criar Pull Request: %v", err))
+		}
+
+		return commitSuccessMsg("Pull Request criada com sucesso!")
 	}
 }
 
